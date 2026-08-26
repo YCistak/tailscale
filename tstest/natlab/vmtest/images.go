@@ -158,50 +158,56 @@ func ensureImage(ctx context.Context, img OSImage) error {
 	if img.IsGokrazy {
 		return nil // gokrazy images are handled separately
 	}
+	// Images are cached as bare qcow2, so an xz-compressed download is
+	// decompressed on the way in and img.SHA256 covers the qcow2.
+	return ensureCached(ctx, img.Name, img.URL, cachedImagePath(img), img.SHA256, strings.HasSuffix(img.URL, ".xz"))
+}
 
-	cacheDir := imageCacheDir()
-	if err := os.MkdirAll(cacheDir, 0755); err != nil {
+// ensureCached downloads url to cachedPath unless a file with the wanted hash
+// is already there. name is for logs and errors only. If decompressXZ, the
+// download is xz-decompressed on the way to disk, so wantSHA256 (when
+// non-empty) covers the decompressed bytes.
+//
+// The download lands in a temporary file and is renamed into place only after
+// the hash checks out, so cachedPath is never a truncated or corrupt file.
+func ensureCached(ctx context.Context, name, url, cachedPath, wantSHA256 string, decompressXZ bool) error {
+	if err := os.MkdirAll(filepath.Dir(cachedPath), 0755); err != nil {
 		return err
 	}
 
-	// Use a filename based on the image name.
-	cachedPath := filepath.Join(cacheDir, img.Name+".qcow2")
 	if _, err := os.Stat(cachedPath); err == nil {
-		// If we have a SHA256 to verify, check it.
-		if img.SHA256 != "" {
-			if err := verifySHA256(cachedPath, img.SHA256); err != nil {
-				log.Printf("cached image %s failed SHA256 check, re-downloading: %v", img.Name, err)
-				os.Remove(cachedPath)
-			} else {
-				return nil
-			}
-		} else {
+		if wantSHA256 == "" {
 			return nil // exists, no hash to verify
+		}
+		if err := verifySHA256(cachedPath, wantSHA256); err != nil {
+			log.Printf("cached %s failed SHA256 check, re-downloading: %v", name, err)
+			os.Remove(cachedPath)
+		} else {
+			return nil
 		}
 	}
 
-	isXZ := strings.HasSuffix(img.URL, ".xz")
-	log.Printf("downloading %s from %s...", img.Name, img.URL)
+	log.Printf("downloading %s from %s...", name, url)
 
-	req, err := http.NewRequestWithContext(ctx, "GET", img.URL, nil)
+	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {
-		return fmt.Errorf("downloading %s: %w", img.Name, err)
+		return fmt.Errorf("downloading %s: %w", name, err)
 	}
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		return fmt.Errorf("downloading %s: %w", img.Name, err)
+		return fmt.Errorf("downloading %s: %w", name, err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != 200 {
-		return fmt.Errorf("downloading %s: HTTP %s", img.Name, resp.Status)
+		return fmt.Errorf("downloading %s: HTTP %s", name, resp.Status)
 	}
 
 	// Set up the reader pipeline: HTTP body → (optional xz decompress) → file.
 	var src io.Reader = resp.Body
-	if isXZ {
+	if decompressXZ {
 		xzr, err := xz.NewReader(resp.Body)
 		if err != nil {
-			return fmt.Errorf("creating xz reader for %s: %w", img.Name, err)
+			return fmt.Errorf("creating xz reader for %s: %w", name, err)
 		}
 		src = xzr
 	}
@@ -219,23 +225,23 @@ func ensureImage(ctx context.Context, img OSImage) error {
 	h := sha256.New()
 	w := io.MultiWriter(f, h)
 	if _, err := io.Copy(w, src); err != nil {
-		return fmt.Errorf("downloading %s: %w", img.Name, err)
+		return fmt.Errorf("downloading %s: %w", name, err)
 	}
 	if err := f.Close(); err != nil {
 		return err
 	}
 
-	if img.SHA256 != "" {
+	if wantSHA256 != "" {
 		got := hex.EncodeToString(h.Sum(nil))
-		if got != img.SHA256 {
-			return fmt.Errorf("SHA256 mismatch for %s: got %s, want %s", img.Name, got, img.SHA256)
+		if got != wantSHA256 {
+			return fmt.Errorf("SHA256 mismatch for %s: got %s, want %s", name, got, wantSHA256)
 		}
 	}
 
 	if err := os.Rename(tmpFile, cachedPath); err != nil {
 		return err
 	}
-	log.Printf("downloaded %s", img.Name)
+	log.Printf("downloaded %s", name)
 	return nil
 }
 
