@@ -91,6 +91,9 @@ type qemuCloudPlatform struct{}
 func (qemuCloudPlatform) planSteps(e *Env, n *Node) {
 	e.Step(fmt.Sprintf("Compile %s_%s binaries", n.os.GOOS(), n.os.GOARCH()))
 	e.Step(fmt.Sprintf("Prepare %s image", n.os.Name))
+	if n.dnsMode == DNSOpenresolv {
+		e.Step(openresolvStepName)
+	}
 	e.Step("Launch QEMU: " + n.name)
 }
 
@@ -100,6 +103,12 @@ func (qemuCloudPlatform) boot(ctx context.Context, e *Env, n *Node) error {
 	e.ensureCompiled(ctx, goos, goarch)
 
 	if err := e.ensureImage(ctx, n.os); err != nil {
+		return err
+	}
+
+	// Must run before the VM launches: this registers the files with vnet's
+	// fileserver, and cloud-init fetches them while the guest boots.
+	if err := e.ensureDNSModeAssets(ctx, n.dnsMode); err != nil {
 		return err
 	}
 

@@ -128,12 +128,61 @@ var (
 	}
 )
 
+// ThirdPartyAsset is a pinned upstream file that natlab installs into a guest.
+// It covers software that no cloud image ships and that the guest cannot fetch
+// for itself, because vnet has no route to the real internet. natlab downloads
+// it on the host into the vmtest cache and serves it to the guest over vnet's
+// fileserver.
+type ThirdPartyAsset struct {
+	Name   string // cache filename, extension included
+	URL    string
+	SHA256 string // expected hash of the file as served, before any decompression
+}
+
+// openresolvRef pins the openresolv revision natlab installs, as a commit
+// rather than the v3.17.4 tag it carries: a tag can be moved, a commit cannot.
+// The files below are byte-identical to the same-named members of the v3.17.4
+// release tarball.
+const openresolvRef = "6489889ce5631364ad2f17d391e1a3ad969619f2" // v3.17.4
+
+// openresolv is upstream openresolv, the resolvconf implementation behind
+// net/dns's "openresolv" backend. Its build is a handful of sed substitutions
+// over these two POSIX shell scripts rather than a compile, so natlab fetches
+// them and substitutes in-process instead of installing a package. See
+// resolvconf.go.
+var (
+	// openresolvScript is the resolvconf(8) program itself.
+	openresolvScript = openresolvAsset("resolvconf.in",
+		"c806bd4aa0d1c59736beae3af8a7e4c7cfd6a24664cfbc01be10b28af89f5b8c")
+
+	// openresolvLibc is the subscriber that writes /etc/resolv.conf.
+	openresolvLibc = openresolvAsset("libc.in",
+		"25b7ba247cb033130035a09751d78be40786ee449a93f31c61b93409dabd54ea")
+)
+
+// openresolvAsset describes the openresolv source file named member, at
+// openresolvRef. The URL and the cache name both derive from that ref, so a
+// version bump means changing one constant and the hashes.
+func openresolvAsset(member, sha256 string) ThirdPartyAsset {
+	return ThirdPartyAsset{
+		Name:   "openresolv-" + openresolvRef[:12] + "-" + member,
+		URL:    "https://raw.githubusercontent.com/NetworkConfiguration/openresolv/" + openresolvRef + "/" + member,
+		SHA256: sha256,
+	}
+}
+
 // CloudImages returns the set of QEMU-bootable cloud OS images natlab can
 // use for vmtests, excluding gokrazy (built from source) and macOS (which
 // uses a separate snapshot pipeline). It is intended for tooling such as
 // a CI prep step that wants to warm the image cache.
 func CloudImages() []OSImage {
 	return []OSImage{Ubuntu2404, Debian12, FreeBSD150, Fedora43}
+}
+
+// ThirdPartyAssets returns every [ThirdPartyAsset] natlab vmtests can install
+// into a guest, for the same cache-warming tooling as [CloudImages].
+func ThirdPartyAssets() []ThirdPartyAsset {
+	return []ThirdPartyAsset{openresolvScript, openresolvLibc}
 }
 
 // EnsureImage downloads img to the local cache if not already present.
@@ -144,13 +193,29 @@ func EnsureImage(ctx context.Context, img OSImage) error {
 	return ensureImage(ctx, img)
 }
 
+// EnsureAsset downloads asset to the local cache if not already present, for
+// the same cache-warming tooling as [EnsureImage].
+func EnsureAsset(ctx context.Context, asset ThirdPartyAsset) error {
+	return ensureAsset(ctx, asset)
+}
+
 // imageCacheDir returns the directory for cached VM images.
 func imageCacheDir() string {
+	return cacheDir("images")
+}
+
+// assetCacheDir returns the directory for cached [ThirdPartyAsset] downloads.
+// Assets keep their own filenames, unlike images, which are cached as .qcow2.
+func assetCacheDir() string {
+	return cacheDir("assets")
+}
+
+func cacheDir(kind string) string {
 	if d := os.Getenv("VMTEST_CACHE_DIR"); d != "" {
 		return d
 	}
 	home, _ := os.UserHomeDir()
-	return filepath.Join(home, ".cache", "tailscale", "vmtest", "images")
+	return filepath.Join(home, ".cache", "tailscale", "vmtest", kind)
 }
 
 // ensureImage downloads and caches the OS image if not already present.
@@ -161,6 +226,13 @@ func ensureImage(ctx context.Context, img OSImage) error {
 	// Images are cached as bare qcow2, so an xz-compressed download is
 	// decompressed on the way in and img.SHA256 covers the qcow2.
 	return ensureCached(ctx, img.Name, img.URL, cachedImagePath(img), img.SHA256, strings.HasSuffix(img.URL, ".xz"))
+}
+
+// ensureAsset downloads and caches asset if not already present.
+func ensureAsset(ctx context.Context, asset ThirdPartyAsset) error {
+	// Assets are cached as downloaded: they're files we read in-process (see
+	// resolvconf.go), not disk images QEMU has to open.
+	return ensureCached(ctx, asset.Name, asset.URL, cachedAssetPath(asset), asset.SHA256, false)
 }
 
 // ensureCached downloads url to cachedPath unless a file with the wanted hash
@@ -266,6 +338,11 @@ func verifySHA256(path, expected string) error {
 // cachedImagePath returns the filesystem path to the cached image for the given OS.
 func cachedImagePath(img OSImage) string {
 	return filepath.Join(imageCacheDir(), img.Name+".qcow2")
+}
+
+// cachedAssetPath returns the filesystem path to the cached download of asset.
+func cachedAssetPath(asset ThirdPartyAsset) string {
+	return filepath.Join(assetCacheDir(), asset.Name)
 }
 
 // createOverlay creates a qcow2 overlay image on top of the given base image.

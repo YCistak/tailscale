@@ -108,6 +108,7 @@ type Env struct {
 	compileMu     sync.Mutex
 	compileOnce   map[string]*sync.Once // keyed by goos_goarch
 	imageOnce     map[string]*sync.Once // keyed by OSImage.Name
+	dnsAssetOnce  map[DNSMode]*sync.Once
 
 	// Web UI support.
 	ctx        context.Context // cancelled when test ends
@@ -489,7 +490,7 @@ func (e *Env) AddNode(name string, opts ...any) *Node {
 			n.webServerPort = int(o)
 		case nodeOptDNSMode:
 			switch DNSMode(o) {
-			case DNSDefault, DNSDirect:
+			case DNSDefault, DNSDirect, DNSOpenresolv:
 			default:
 				e.t.Fatalf("AddNode(%q): unsupported DNSMode %q", name, DNSMode(o))
 			}
@@ -579,6 +580,14 @@ const (
 	// DNSDirect masks systemd-resolved and installs a plain /etc/resolv.conf
 	// so tailscaled selects the "direct" manager (rewrites resolv.conf itself).
 	DNSDirect DNSMode = "direct"
+
+	// DNSOpenresolv masks systemd-resolved and installs upstream openresolv
+	// (which no cloud image ships), so tailscaled selects the "openresolv"
+	// manager. Its key directory is created empty, so the only snippet ever
+	// registered is Tailscale's own. That is the state tailscale/tailscale#20825
+	// got wrong: openresolv reports "no snippets" by exiting 2, which net/dns
+	// could not tell apart from a real failure.
+	DNSOpenresolv DNSMode = "openresolv"
 )
 
 // OS returns a NodeOption that sets the node's operating system image.
