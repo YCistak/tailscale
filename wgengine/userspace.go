@@ -595,7 +595,7 @@ func NewUserspaceEngine(logf logger.Logf, conf Config) (_ Engine, reterr error) 
 		}
 		e.linkChangeQueue.Add(func() { e.linkChange(&cd) })
 	})
-	eventbus.SubscribeFunc(ec, func(update events.PeerDiscoKeyUpdate) {
+	eventbus.SubscribeFunc(ec, func(update events.DiscoKeyAdvertisement) {
 		e.logf("[v1] wgengine: got TSMP disco key advertisement from %v via eventbus", update.Src)
 		if e.magicConn == nil {
 			e.logf("wgengine: no magicConn")
@@ -710,7 +710,7 @@ func (e *userspaceEngine) ResetDevicePeer(k key.NodePublic) {
 	e.wgLock.Lock()
 	defer e.wgLock.Unlock()
 	e.wgLogger.Invalidate()
-	e.wgdev.RemovePeer(k.Raw32())
+	e.wgdev.ScheduleHandshakeOnUserSend(k.Raw32())
 }
 
 // SetPeerByIPPacketFunc installs a callback used by wireguard-go to look up

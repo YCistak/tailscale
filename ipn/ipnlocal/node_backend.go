@@ -170,14 +170,6 @@ type nodeBackend struct {
 	// nil in production, where no test installs a waiter.
 	keyWaitersForTest map[key.NodePublic]chan struct{}
 
-	// tsmpLearnedDisco records, per node key, a peer disco key that was
-	// learned via TSMP (that is, over an existing WireGuard session with
-	// that peer). When a netmap update later reports the same disco key
-	// change, the peer's WireGuard session does not need to be reset,
-	// because the change demonstrably arrived over a working session.
-	// See [nodeBackend.discoChangedLocked].
-	tsmpLearnedDisco map[key.NodePublic]key.DiscoPublic
-
 	// routeMgr tracks this node's view of which IPs route to which
 	// peers and publishes lock-free snapshots for the data plane and
 	// the OS router. It is initialized once and immutable, but its
@@ -885,12 +877,6 @@ func (nb *nodeBackend) updatePeersLocked() (discoChanged []key.NodePublic, route
 			discoChanged = append(discoChanged, p.Key())
 		}
 	}
-	// Drop TSMP-learned disco keys for peers no longer in the netmap.
-	for k := range nb.tsmpLearnedDisco {
-		if _, ok := nb.nodeByKey[k]; !ok {
-			delete(nb.tsmpLearnedDisco, k)
-		}
-	}
 
 	// Resync the route manager to the new peer set. Upserts of
 	// unchanged peers are cheap no-ops; this is a full-netmap event,
@@ -908,47 +894,20 @@ func (nb *nodeBackend) updatePeersLocked() (discoChanged []key.NodePublic, route
 	return discoChanged, res.AllowedIPs
 }
 
-// recordTSMPLearnedDisco notes that a peer's new disco key was learned via
-// TSMP, so the netmap update carrying the same change need not reset the
-// peer's WireGuard session. See the [nodeBackend.tsmpLearnedDisco] field doc.
-func (nb *nodeBackend) recordTSMPLearnedDisco(pub key.NodePublic, disco key.DiscoPublic) {
-	nb.mu.Lock()
-	defer nb.mu.Unlock()
-	mak.Set(&nb.tsmpLearnedDisco, pub, disco)
-}
-
 // discoChangedLocked reports whether a peer's disco key change from prev to
-// cur should reset the peer's WireGuard session. A changed disco key means
-// the peer restarted, so any existing session key material is dead weight;
-// resetting lets the handshake start over immediately. The exception is a
-// key change already learned via TSMP: that arrived over a working WireGuard
-// session with the peer, so the session is demonstrably fine and is kept.
+// cur should trigger an opportunistic handshake the peer's WireGuard session.
+// A changed disco key means the peer restarted, or that control caught up with
+// the TSMP learned key material, so any existing session key material is
+// possiblydead weight. Sending an opportunistic handshake lets the connection
+// recover faster in the case where the peer restarted.
 //
-// It consumes any [nodeBackend.tsmpLearnedDisco] entry for pub.
 // nb.mu must be held.
+// TODO(cmol): Should this still be locked and hold the lock?
 func (nb *nodeBackend) discoChangedLocked(pub key.NodePublic, prev, cur key.DiscoPublic) bool {
 	if prev.IsZero() || cur.IsZero() || prev == cur {
 		return false
 	}
-	if discoTSMP, ok := nb.tsmpLearnedDisco[pub]; ok {
-		delete(nb.tsmpLearnedDisco, pub)
-		if discoTSMP == cur {
-			nb.logf("nodeBackend: skipping WireGuard session reset (TSMP key): %s changed from %q to %q",
-				pub.ShortString(), prev, cur)
-			return false
-		}
-		// The new disco key does not match what we received via
-		// TSMP for this peer. This is unexpected, though possible
-		// if processing a change in a large netmap ends up taking
-		// longer than the 2 second timeout in
-		// [controlclient.mapRoutineState.UpdateNetmapDelta], or if
-		// the context is cancelled mid update. Log the event, and reset
-		// the session as it is possibly a stale entry in the map
-		// instead of a TSMP disco key update that led us here.
-		nb.logf("nodeBackend: [unexpected] using TSMP key for %s (control stale): tsmp=%q control=%q old=%q",
-			pub.ShortString(), discoTSMP, cur, prev)
-		metricTSMPLearnedKeyMismatch.Add(1)
-	}
+
 	nb.logf("nodeBackend: peer %s disco key changed from %q to %q", pub.ShortString(), prev, cur)
 	return true
 }
@@ -1119,8 +1078,6 @@ func (nb *nodeBackend) UpdateNetmapDelta(muts []netmap.NodeMutation) (res netmap
 						res.DiscoChanged.Make()
 						res.DiscoChanged.Add(m.Node.Key())
 					}
-				} else {
-					delete(nb.tsmpLearnedDisco, old.Key())
 				}
 				// Evict index entries derived from the old node value
 				// before re-adding them from the new one below, so a
@@ -1162,7 +1119,6 @@ func (nb *nodeBackend) UpdateNetmapDelta(muts []netmap.NodeMutation) (res netmap
 				delete(nb.nodeByKey, old.Key())
 				delete(nb.nodeByWGString, old.Key().WireGuardGoString())
 				delete(nb.nodeByStableID, old.StableID())
-				delete(nb.tsmpLearnedDisco, old.Key())
 				nb.removeNodeNameLocked(old.Name())
 				delete(nb.peers, nid)
 				rt.RemovePeer(nid)

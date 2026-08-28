@@ -1530,12 +1530,11 @@ func (de *endpoint) updateDiscoKey(key key.DiscoPublic) {
 		if old != nil {
 			epDisco.tsmpKey = old.tsmpKey
 			epDisco.tsmpShort = old.tsmpShort
-			epDisco.tsmpActive = key.IsZero()
+			epDisco.tsmpActive = old.tsmpActive || key.IsZero()
 		}
 		if !key.IsZero() {
 			epDisco.controlKey = key
 			epDisco.controlShort = key.ShortString()
-			epDisco.tsmpActive = false
 		}
 		// We have no key material, nil out key.
 		if epDisco.controlKey.IsZero() && epDisco.tsmpKey.IsZero() {
